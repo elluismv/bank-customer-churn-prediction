@@ -1,0 +1,1082 @@
+---
+title: "Proyecto2_Regresion_Logisitca"
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-06-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r, message=FALSE}
+library(GGally)      # este es del ggpairs
+library(lmtest)      # este del para lrtest
+library(car)         # este es para pruebas de hipótesis (boxTidwell, vif, kappa.lm)
+library(caret)       # este es para confusionMatrix
+library(tidyverse)   # este es manipulación y visualización
+library(pROC)        # este espara curva ROC y AUROC
+library(forecast)    # este es para ggtsdisplay
+library(randtests)   # este est para runs.test
+library(psych)       # este es para describe()
+```
+
+```{r}
+datos_raw <- read.csv("data/Churn_Modelling(in).csv")
+```
+
+# 1. Análisis Exploratorio
+
+## 1.1 Descripción General del Conjunto de datos
+
+```{r}
+str(datos_raw)
+```
+
+El dataset tiene 10,000 registros y 14 variables.
+
+| Variable        |                   Descripción                    |
+|-----------------|:------------------------------------------------:|
+| RowNumber       |                   No. Registro                   |
+| CustomerId      |                  ID del cliente                  |
+| Surname         |                     Apellido                     |
+| CreditScore     |                 Score Crediticio                 |
+| Geography       |                       País                       |
+| Gender          |                      Género                      |
+| Age             |                       Edad                       |
+| Tenure          |             Antiguedad como cliente              |
+| Balance         |                      Saldo                       |
+| NumOfProducts   |            No. Productos contratados             |
+| HasCrCard       |             Tiene tarjeta de crédito             |
+| IsActiveMember  |                  Cliente activo                  |
+| EstimatedSalary |                 Salario estimado                 |
+| Exited          | Variable objetivo (1 = Abandonó, 0 = Permaneció) |
+
+- La variable de respuesta será: **Exited** con un enfoque en explicar el abandono de los clientes.
+- Las columnas *RowNumber*, *CustomerId* & *Surname* son identificadores. No son útiles para explicar el abandono.
+- Las variables *Geography*, *Gender*, *HasCrCard*, *IsActiveMember*, *Exited*, son variables categóricas.
+- La variable *NumOfProd* es númerica discreta.
+- Las variables *Balance*, *Salary*, *Age*, Tenure y *CreditScore* son numéricas.
+
+```{r}
+unique(datos_raw$Geography)       # 3 países: France, Germany, Spain
+unique(datos_raw$NumOfProducts)   # Hasta 4 productos
+```
+
+Los países que este dataset contempla son 3: **Francia**, **Alemania** y **España**. Probablemente son regiones en las que este banco tiene presencia. Hay clientes que poseen hasta 4 productos.
+
+```{r}
+datos <- datos_raw %>%
+  select(-RowNumber, -CustomerId, -Surname)
+rm(datos_raw)
+```
+
+Se eliminaron los identificadores (*RowNumber*, *CustomerId* & *Surname*) que no fungen como predictores ni en el análisis.
+
+```{r}
+datos <- datos %>%
+  mutate(
+    Geography     = factor(Geography),        
+    Gender        = factor(Gender),         
+    HasCrCard     = factor(HasCrCard,levels = c(0, 1), labels = c("No", "Si")), # Tiene tarjeta de Crédito: 0 =  No, 1 = Sí
+    IsActiveMember = factor(IsActiveMember, levels = c(0, 1), labels = c("No", "Si")), # Es miembro activo: 0 =  No, 1 = Sí
+    NumOfProducts = factor(NumOfProducts),  # No. Productos: 1, 2, 3, 4 - Pocos Niveles
+    Exited        = factor(Exited, levels = c(0, 1), labels = c("Permanece", "Abandona")) # Variable Dependiente: 0 = Permanece, 1 = Abandona
+  )
+```
+
+Se transformaron las variables categóricas, asi como la variable de respuesta en factores mediante *factor()* y poder usarlas estadísticamente. En algunas se les agregó su etiqueta de clase y mejorar la interpretabilidad tanto en el análisis exploratorio (gráficas) y como en los resultados del modelo (coeficientes, momios, etc.)
+
+Dado que la clase de interés es "Abandona", la clase de referencia es "Permanece". Se eligió la referencia de la variable de Género que es "*Female*", para Geografía es "*Francia*" y Número de Productos es "*1*".
+
+```{r}
+levels(datos$Exited)  # Verificar: "Permanece" es primero (referencia)
+levels(datos$Gender)    # Verficar referencia
+levels(datos$Geography)   # Verficar referencia
+levels(datos$NumOfProducts)# Verficar referencia
+```
+
+No se encontró la existencia de valores faltantes mediante *is.na()*. No fue necesario realizar imputación o eliminación de registros.
+
+```{r}
+colSums(is.na(datos))
+#colSums(datos == "", na.rm = TRUE)
+```
+
+Distribución de "***Exited"***
+
+```{r}
+table(datos$Exited)
+prop.table(table(datos$Exited))
+```
+
+La variable de respuesta posee una distribución desbalanceada. De los 10,000 clientes 7,963 (79.63%) permanecieron, mientras que 2,037 (20.37%) abandonaron. Existe un aproporción de 4 a 1, por lo que el *Accuracy* del modelo prodría resultar engañoso. De hecho, un modelo que clasificara (absurdamente) todos los clientes como "Permanece" alcanzaría un *Accuracy* de 79.63% lo cual es es una referencia para comparar las métricas de clasificación, especialmente las *Sensibilidad* y la curva *ROC* que serán muy relevantes.
+
+## 1.2 Análisis Univariado
+
+### 1.2.1 Variables Numéricas
+
+Se analizaron las variables numéricas mediante estadísticos descriptivos y distribuciones de frecuencia.
+
+```{r}
+## Variables Numéricas: Medidas de Tendencia Central, Dispersión, Asimetría
+var_num <- datos %>% select(CreditScore, Age, Tenure, Balance, EstimatedSalary)
+#summary(var_num)
+describe(var_num)
+```
+
+```{r}
+# Histogramas
+var_num_long <- pivot_longer(bind_cols(var_num, Exited = datos$Exited),
+                              cols = -Exited, names_to = "Variable", values_to = "Valor")
+ggplot(var_num_long, aes(x = Valor)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.8) +
+  facet_wrap(~Variable, scales = "free") +
+  theme_bw() +
+  labs(title = "Distribución de Variables Numéricas", x = "", y = "Frecuencia")
+```
+
+Para estas se encontró que:
+
+- *Score* Crediticio: Esta variable muestra una forma aproximademente simétrica y cercana a una dsitribución normal. La media (650.53) y la mediana (651.01) son prácticamente iguales. La asimetría es de -0.07 muy cercana a 0, mientras que la curtosis es de -0.43, sugiriendo una distribución ligeramenta más plana que una normal.
+
+- *Age*: Esta variable demuestra una distribución asimétrica hacia la derecha. La media (38.92) ligeramente superior a la mediana (37.91), que coincide con la asimetria postiva (1.01), mientras que la curtosis de 1.39 ($\sim$Leptocúrtica). La mayoría de los clientes se ubican entre 30 y 45 años.
+
+- *Tenure*: Esta variable representa los años de antiguedad del cleinte. Toma valores discretos entre 0 y 1. Su distribución es relativamente uniforme, con un asimetría de 0.01 y curtosis negativa (-1.17). A primera vista, no observa una concentración marcada en algún nivel de antiguedad.
+
+- *Balance*: Esta variable presenta un comportamiento a destacar. El histograma demuestra una gran acumulación de observaciones en el valor cero, seguido de una distribución aproximadamente unimodal de clientes con saldos positivos. A primera vista, sugiere la existencia de dos grupos claramente diferenciados: clientes sin saldo en la cuenta (*Balance* = 0) y clientes con saldo positivo (*Balance* \> 0). Resulta interesante explorar la posibilidad crear posteriormente una variable indicadora que logre diferenciar ambos grupos.
+
+- *EstimatedSalary*: Esta variable presenta una distribución prácticamente uniforme en todo su rango. La media (100090.24) y la mediana (100193.91) son muy similares. No hay asimetria. A primera vista, tampoco se observan concentraciones importantes que marquen algun nivel o que sugiera relación directa con el abandono de clientes.
+
+*(Nota: En este paquete estadístico se considera una distribución normal perfecta, con una curtosis igual a 0.)*
+
+### 1.2.2 Variables Categóricas
+
+Se analizaron las variables categóricas mediante tablas de frecuencia.
+
+```{r}
+# Variables Categóricas: Frecuencias Absolutas y Relativas
+var_cat <- c("Geography", "Gender", "HasCrCard", "IsActiveMember", "NumOfProducts")
+
+for (v in var_cat) {
+  cat("\n---", v, "---\n")
+  cat("Frecuencia: ", table(datos[[v]]),"\n")
+  cat("Frecuencia Relativa: ", prop.table(table(datos[[v]])),"\n")
+}
+```
+
+Para estas se encontró que:
+
+- *Geography*: Esta variable presenta tres categorías. La mayoría de los clientes provienen de Francia (50.14%), seguido de Alemania (25.09%) y España (24.77%). A pesar de que existe una categoría dominante, las tres tienen tamaños suficientes para poder comparar con respecto al abandono.
+
+- *Gender*: Esta variable está relativamente equilibrada. El 54.57% de los clientes son hombres y el 45.43% son mujeres. No se observa un desbalance importante.
+
+- *HasCrCard*: Se muestra que el 70.55% de los clientes poseen tarjeta de crédito, mientras que el 29.45% no cuentan con una. Igual, existe una categoría predominante.
+
+- *IsActiveMember*: Esta variable indica una distribución prácticamente balanceada entre los clientes que son miemebros activo y los que no, siendo favorable para analizar entre ambos grupos.
+
+- *NumOfProducts*: Se observa que la mayoria de los clientes posee uno o dos productos con 50.84% y 45.90%. Las categorías de tres y cuatro productos representan un porcentaje menor al \~2%
+
+## 1.3 Ánalisis Bivariado y Multivariado
+
+### 1.3.1 Variables Numéricas
+
+Con el objetivo de indentificar posibles diferencias entre los clientes que abandonan y los que permanecen, se analizaron *boxplots* de las variables condicionadas por nuestra variable de respuesta.
+
+```{r}
+## Boxplots: Numéricas vs Exited
+ggplot(var_num_long, aes(x = Exited, y = Valor, fill = Exited)) +
+  geom_boxplot(alpha = 0.7) +
+  facet_wrap(~Variable, scales = "free") +
+  scale_fill_manual(values = c("Permanece" = "steelblue", "Abandona" = "tomato")) +
+  theme_bw() +
+  labs(title = "Variables Numéricas por Categoría de Exited",
+       x = "Exited (0 = Permanece, 1 = Abandona)", y = "Valor", fill = "Exited")
+
+```
+
+```{r}
+## Promedio de las variables dado Exited
+aggregate(cbind(Age, Balance, CreditScore,
+                EstimatedSalary, Tenure) ~ Exited,
+          data = datos,
+          mean)
+```
+
+Se encontraron los siguientes hallazgos:
+
+- La variable de Edad muestra la separación más evidente entre ambos grupos. Los clientes que abandonan presentan una mediana considerablemente mayor a los que clientes que permanecen. Además, los que abandonan se desplazan hacia arriba (edades mayores), sugieriendo que el abandono podría incrementarse conforme aumenta la edad del cliente. Se espera que esta variable resulte discriminante y estadisticamente significativa dentro de los modelos.
+
+- En el Balance se observa ligeras diferencias entre los grupos. Se podría decir que en promedio clientes con saldos más elevados abandonan. No obstante, se destaca el fenómeno de observaciones con saldo igual a 0 (*Balance* = 0) que se identificó en el análisis univariado. Esto sugiere que podría haber información relvante para discriminar y explicar el abandono. Aunque, hasta este momento, pareciera que aquellos clientes sin saldo son más propensos a quedarse.
+
+- Las dsitribuciones de Score Crediticio son muy similares en ambas categorias. Lo mismo ocurre con sus medianas , rangos intercuartilicos y dispersión. Visualmente parece no existir una relación fuerte entre el Score Crediticio y el abandono.
+
+- El mismo caso sucede con el Salario Estimado. No se observan diferencias importantes entre los salarios y los grupos. Lo mismo ocurre con sus medianas, dispersión y rangos. Visualmente esta variable no posee una gran capacidad de discriminar entre clientes que permanecen o abandonan.
+
+- Por último, la anitguedad (*Tenure*) presenta también distribuciones parecidas. Aunque existen ligeras diferencias en algunos cuantiles, no se observa una separación. El efecto que tendrá en el modelo se estima que sea relativamente pequeña.
+
+Entonces, las variables que muestran mayor capacidad de diferenciación entre clientes que abandonan y permanecen son ***Age*** y ***Balance***, mientras que las otras presentan diferencias más reducidas y podrían aportar menor información predictiva.
+
+### 1.3.2 Variables Categóricas
+
+Para indentificar posibles diferencias entre los clientes que abandonan y los que permanecen, se analizaron gráficos de barrasde las variables condicionadas por nuestra variable de respuesta.
+
+```{r, message=FALSE, warning=FALSE}
+## Barras: Categóricas vs Exited
+for (v in var_cat) {
+  p <- ggplot(datos, aes_string(x = v, fill = "Exited")) +
+    geom_bar(position = "fill", alpha = 0.85) +
+    scale_fill_manual(values = c("Permanece" = "steelblue", "Abandona" = "tomato")) +
+    scale_y_continuous(labels = scales::percent) +
+    theme_bw() +
+    labs(title = paste("Proporción de Exited por", v),
+         y = "Proporción", fill = "Exited")
+  print(p)
+}
+```
+
+- La tasa de abandono difiere considerablemente entre países: Francia: \~16%, España: \~17% y Alemania: \~32% que es casi el doble con respecto a Francia y España, reflejando ser una variable importante y probablemente significativa.
+- En género, se observa una diferencia moderada de abandono: Mujeres: \~25% y Hombres: \~ 16%, siendo mujeres las que tienen una probabilidad considerablemente mayor de abandono.
+- La tasa de los clientes que tienen tarjeta de crédito y los que no, son prácticamente iguales (\~21% - \~ 20%). Visualmente no parece una variable con gran capacidad de discriminar.
+- En cuanto a los miembro activos, se observa una diferencia muy clara de abandono: No Activo: \~27%y Activo: \~14%, siendo que la probabilidad de abandono casi se duplica entre clientes no activos. Como es de esperarse, esta variable resulta ser prometedora para explicar el abandono.
+- Por último, se destacan las tasas de abandono entre los productos :
+  - 1 Producto: \~28%
+  - 2 Productos: \~8%
+  - 3 Productos: \~83%
+  - 4 Productos: \~100%
+
+Esta relación osbervada en los productos no parece ser lineal. Los clientes con dos productos presentan la menor tasa de abandono, mientras que aquellos con más de dos, muestran tasas mucho más grandes. De hecho, es por esta razón que la variable se consideró como categórica (ó discreta de pocos niveles) inicialmente. Tratarla sin esta categorización podría hacer que el modelo capture una linealidad inexistente de que entre más productos mayor tasa de abandono, cuando claramente pareceria un comportamiento especial, donde tener en especifico uno o dos productos la tasa de abandono es muy baja. Además cabe resaltar que, como se observó en la *Seccion 1.2.2*, los productos 3 y especialmente 4 presentan pocas observaciones (\<\~2%), lo que podría dar como resultado estimables no confiables o inestables por una separación completa.
+
+```{r}
+# Proporción den No. de Productos dado Exited
+prop.table(table(datos$NumOfProducts, datos$Exited),1)
+```
+
+Ahora bien, antes de comprobar las correlaciones entre las variables y la detección de multicolinealidad temprana. Se decidió profundizar en la variable *Balance*. En el análisis exploratorio se observó una concentración importante de observaciones con saldo igual a cero, y que de primera instancia parece indicar que estos clientes tienden a permanecer.
+
+```{r}
+# Histograma y Bloxplot de Balance
+ggplot(datos, aes(x = Balance)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.8)+
+  theme_bw() +
+  labs(title = "Distribución de Balancec", x = "", y = "Frecuencia")
+ggplot(datos, aes(y = Balance, fill = Exited)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = c("Permanece" = "steelblue", "Abandona" = "tomato")) +
+  theme_bw() +
+  labs(title = "Balance por Exited",
+       x = "Exited (0 = Permanece, 1 = Abandona)", y = "Frecuencia", fill = "Exited")
+
+```
+
+Al separar, o agrupar, aquellos clientes con saldo igual cero, y clientes con saldo diferente (en este caso mayor de cero), se confirma que la tasa de abandono para clientes sin saldo es significativamente menor (\~13.82%) con respecto a los que tienen un saldo mayor a 0 (\~24%). Esta es una diferencia importante, además de que visualmente parece que se trata de dos poblaciones distintas.
+
+```{r}
+# Proporción de Balance = 0 dado Exited
+prop.table(table(datos$Balance == 0, datos$Exited),margin=1)
+```
+
+Por lo tanto, a partir de este hallazgo, se planteó construir una nueva variable indicadora binaria denominada "Balance_Zero", que toma el valor de '1' cuando el cliente presenta saldo igual a cero y '0' en caso contrario. Lo que se busca es capturar posibles características del saldo que la variable *Balance* en su forma continua podría no reflejar adecuadamente.
+
+```{r}
+# Conversión de de variable Balance a dicotomica
+datos$Balance_Zero <- ifelse(datos$Balance == 0, 1, 0)
+datos$Balance_Zero <- factor(datos$Balance_Zero,labels = c("No", "Si"))
+```
+
+```{r}
+ggplot(datos, aes_string(x = datos$Balance_Zero, fill = "Exited")) +
+    geom_bar(position = "fill", alpha = 0.85) +
+    scale_fill_manual(values = c("Permanece" = "steelblue", "Abandona" = "tomato")) +
+    scale_y_continuous(labels = scales::percent) +
+    theme_bw() +
+    labs(title = paste("Proporción de Exited Balance = 0"),
+         y = "Proporción", fill = "Exited")
+```
+
+Otro caso similar está ocurriendo con la variable NumOfProducts. El hecho de que la tasa abandono sea practicamente del 82% y 100% para clientes con tres o cuatro productos, puede dar como resultado estimaciones inestables no confiables debido a una separación completa. Además, resulta interesante la particularidad de que poseer especificamente dos productos reduzca enormemente la tasa de abandono. Antes de realizar alguna transformación, se incluyó esta variable de esta forma para observar los resultados en el primer modelo y posteriormente realizar los ajustes pertinentes.
+
+```{r}
+# Proporción de No. de Productos dado Exited
+prop.table(table(datos$NumOfProducts, datos$Exited),1)
+```
+
+Ahora si. Para detectar las posibles relaciones entre las variables numéricas y evaluar problemas potenciales de multicolinealidad, se construyó una matriz correlación y dispersión. Los resultados muestran que las correlaciones entre los predictores son demasiado bajas, lo que sugiere que no se anticipan problemas severos de multicolinealidad. Además los gráficos de dispersión no muestran patrones lineales evidentes, ni agrupamientos diferenciables por las categorias de *Exited*, exceptuando uno ligero de *Age*.
+
+```{r, message=FALSE, warning=FALSE}
+## Correlaciones Variables Numéricas (MULTICOLINEALIDAD)
+cor_mat <- cor(var_num, method = "pearson")
+print(round(cor_mat, 3))
+
+## GGPAIRS
+datos %>%
+  select(CreditScore, Age, Balance, EstimatedSalary, Exited) %>%
+  ggpairs(aes(color = Exited, alpha = 0.4),
+          columns = 1:4) +
+  theme_bw() +
+  labs(title = "Matriz de Dispersión — Variables Numéricas por Exited")
+```
+
+## 1.4 Justificación de Predictores
+
+Con lo anterior las siguientes variables candidatas:
+
+| Variable | Hallazgo |
+|------------------------------------|:----------------------------------:|
+| *Age* | Mayor capacidad de discriminación. Diferencia clara en el boxplot. Los clientes mayores tienden más al abandono. La edad puede influir en necesidad financieras, satifacción y por ende en la propensión de cambiar de banco. |
+| *Geography* | Diferencias claras en las tasas de abandono entre los países. Particularmente clientes de Alemania presentan una tasa de abandono superior. Esta variable puede estar asociada a características del mercado o comportamiento del cliente en la región. |
+| *Gender* | Diferencias moderadas en la tasa de abandono. Las mujeres presentaron mayor proporción de abandono que los hombres. |
+| *IsActiveMember* | Asociación fuerte. Diferencia clara en las barras. Los clientes no activos presentan aproximadamente el doble de probabilidad de abandono respecto a clientes activos. Es de esperar que un cliente con menor interacción en cualquier institución financiera tiendan a abandondar sus servicios. |
+| *NumOfProducts* | Diferencias importantes, especialmente clientes con 3-4 productos muestran tasas de abandono muy altas. Se tratará con cuidado y ajusta conforme la marcha. |
+| *Balance* y/o *Balance_Zero* | Comportamiento característico. Diferencias observadas entre ambos grupos, tanto al tratar la variable como continua , como dicotómica. Cuentas con saldo positivo tienen mayor tasa de abandono. Se incluye tanto su forma orginal, como la condicional, para ver la posible aportación de información adicional a los modelos. |
+
+Las variables *CreditScore*, *EstimatedSalary*, *Tenure*, *HasCrCard* mostraron diferencias reducidas entre clientes que permanecen y clientes que abandonan, por lo que no se incluirán inicialmente.
+
+# 2. Modelado
+
+## 2.1 Modelo Saturado
+
+El modelo saturado ajusta un parámetro por cada observación. Dado que se tiene un 10,000 observaciones, al tratar de ajustar este modelo teórico se estiman alrededor de \~9,999 parámetros, lo que resulta muy complejo computacionalmente.
+
+```{r}
+#x_artificial <- factor(seq(nrow(datos)))
+#modelo_saturado <- glm(datos$Exited ~ x_artificial, family = binomial(link = "logit"))
+#residuals(modelo_saturado, type = "deviance") # Residuos = 0 en modelo saturado
+#logLik(modelo_saturado)      # Log-verosimilitud = 0 (verosimilitud del mejor ajuste = 1)
+#modelo_saturado$deviance     # Devianza = 0 porque -2*0 = 0
+#modelo_saturado$df.residual  # gl = 0, estima n parámetros: df = n - n = 0
+#rm(x_artificial)
+```
+
+La devianza que se reporta mediante las funciones; *summary(modelo)* o *modelo\$deviance*, ya se definen implicitamenete al modelo saturado. .Por lo que no es necesario ajustarlo explícitamente para las comparaciones. Se muestra el código para referencia conceptual.
+
+NOTA: La comparación del *lrtest(modelo, modelo_saturado)* es equivalente a evaluar si la devianza residual del modelo es estadísticamente aceptable dado sus grados de libertad, que se infiere directamente del *summary()* de cada modelo.
+
+## 2.2 Modelo Propuesto 1
+
+El primer modelo propuesto incluye variables demográficas (*Age*, *Gender*, *Geography*), un patrón de comportamiento (*IsActiveMember*) y una relación bancaria (*NumOfProducts*)
+
+Se especifica: logit(P(*Exited*=1)) = $\beta_0$ + $\beta_1$Age + $\beta_2$Gender + $\beta_3$Geography + $\beta_4$IsActiveMember +$\beta_5$NumOfProducts
+
+Justificación: Son las variables con más asociación, o que mas discriminan, de acuerdo con el *EDA*. Son factores ajenos al banco (demografía) y o controlables (actividad y productos).
+
+```{r}
+# Especificación Modelo 1
+modelo1 <- glm(Exited ~ Age + Gender + Geography + IsActiveMember + NumOfProducts,
+               data = datos, family = binomial(link = "logit"))
+```
+
+```{r}
+# Métricas de Ajuste Modelo 1
+logLik(modelo1)       # Log-verosimilitud del modelo 1
+modelo1$deviance      # Devianza residual: -2 * logLik(modelo1)
+modelo1$df.residual   # Grados de libertad residuales: n - (número de parámetros estimados)
+lrtest(modelo1)       # LRT vs modelo nulo: evalúa si el modelo aporta sobre solo el intercepto
+anova(modelo1)        # Contribución secuencial de cada predictor a la reducción de devianza
+```
+
+El modelo propuesto presenta un ajuste significativamente superior al modelo nulo ($\chi^2$)= 2669, p \< 0.001), indicando que las variables incluidas aportan información relevante para explicar el abandono de los clientes. El *LogLik* aumentó de -5054.9 a -3720.4.
+
+De acuerdo con la tabla de devianza, todas las variables incorporadas contribuyen significativamente al ajuste del modelo (p \< 0.001). *NumOfProducts* es la que registró un mayor reducción, seguido *Age* y *IsActiveMember*, sugieriendo también que estos predictores poseen una elevada capacidad explicativa.
+
+### 2.2.1 Atributos Modelo 1
+
+```{r,  message=FALSE, warning=FALSE}
+# Atributos Modelo 1
+summary(modelo1)
+exp(coef(modelo1))         # Odds Ratios (cociente de momios)
+exp(confint(modelo1))      # IC de Odds Ratios
+```
+
+- $\beta_1$ = 0.071, postivo y significativo. "Conforme aumenta la edad del cliente, el log-momio de abandono aumenta 0.071 unidades, con lo demás constante. Equivalentemente, por cada año adicional de edad, los momios de abandono aumentan aproximadamente 7.4%, manteniendo lo demás constante. "
+
+- $\beta_2$ = -0.525, negativo y significativo. "Los hombres presentan menor log-momio de abandono que las mujeres. Equivalentemente, los momios de abandono de los hombres son aproximadamente 0.59 veces los de las mujeres, es decir, presentan una reducción cercana al 41%. "
+
+- $\beta_3$ = 0.915, positivo y significativo. "Los clientes alemanes presentan un log-momio de abandono significativamente mayor que los clientes franceses. Equivalentemente, los momios de abandono de los clientes alemanes son aproximadamente 2.5 veces los de los clientes franceses."
+
+- $\beta_4$ = 0.060, positivo y no significativo. Como se observó la *Seccion 1.3.2*, no se encontraron diferencias estadísticamente significativas entre clientes franceses y españoles. Por lo tanto, no existe evidencia suficiente para concluir que la región España tenga un efecto sobre el abandono respecto a Francia.
+
+- $\beta_5$ = -1.104, negativo y significativo. "Los clientes activos presentan un log-momio de abandono menor que los clientes no activos, manteniendo constantes las demás variables. Equivalentemente, los momios de abandono de los clientes activos son aproximadamente 0.33 veces los de los clientes no activos, lo que representa una reducción cercana al 67%."
+
+- $\beta_6$ = -1.52, negativos y significativo. "Los clientes con exactamente dos productos presentan un log-momio de abandono menor que los clientes con un producto. Equivalentemente, los momios de abandono de los clientes con dos productos son aproximadamente 0.22 veces los de los clientes con un producto, lo que representa una reducción cercana al 78%."
+
+- $\beta_7$ = 2.58, positvo y significativo. "Los clientes con tres productos presentan un log-momio de abandono significativamente mayor que los clientes con un producto. Equivalentemente, los momios de abandono de los clientes con tres productos son aproximadamente 13.26 veces los de los clientes con un producto.".
+
+- $\beta_8$ = 16.33, es un coeficiente alto, al igual que error estándar de 175.4, que como se habia previsto en el análisis exploratorio, es debido a la separación completa (tasa del 100% de abandono) donde también influyeron sus pocas obervaciones (60).
+
+Para mitigiar el impacto de esta variable y resolver la baja frecuencia (y separación completa), en las categorías de 3 y 4 productos, se planteó construir una variable binaria que identifique clientes con 3 productos o más. Se respaldo esta agrupación, dado que se encontró que este segmento tiene una tasa de abandono significativamente mayor (\~85%) en comparación con quienes tienen 1 o 2 productos (\~18%).
+
+```{r}
+# Modificación de variable No. de Productos a una con menos niveles.
+prop.table(table(as.numeric(datos$NumOfProducts)>=3 , datos$Exited),1)
+datos$NumProducts_3M <- ifelse(as.numeric(datos$NumOfProducts) >= 3,"3+", as.numeric(datos$NumOfProducts))
+datos$NumProducts_3M <- factor(datos$NumProducts_3M)
+```
+
+## 2.3 Modelo Propuesto 2
+
+El segundo modelo incorpora la variable de numero de productos codificada (*NumProducts_3M*).
+
+Se especifica: logit(P(*Exited*=1)) = $beta_0$ + $\beta_1$Age + $\beta_2$Gender + $\beta_3$Geography + $\beta_4$IsActiveMember + $\beta_5$NumOfProducts_3M
+
+Justificación: Dado que esta variable resultó ser muy discriminatoria y la más reduce la devianza en el modelo pasado, con la transformación se espera que el modelo nuevo logre capturar el patrón orginal y además mejorar su ajuste con respecto al anterior.
+
+No obstante, dado que estos dos primeros modelos incorporan distintas representaciones de las variable *NumOfProducts*, no se constituyen modelos anidados y la comparación no puede ser directamente a través del AIC, Devainza o *Loglik*. Solo se puede compara con estás métricas respecto al modelo nulo o al saturado. De cual quier forma se muestran desplegados.
+
+Se espera que este modelo posea mismo ajuste que al anterior, dado que la única modifiación fue la recodificación de la variable *NumOfProducts*. Por otro lado las métricas de validación y desempeño nos indicarán si fue la recodificación fuen una buena decisión.
+
+```{r}
+# Especificación Modelo 2
+modelo2 <- glm(Exited ~ Age + Gender + Geography + IsActiveMember + NumProducts_3M,
+               data = datos, family = binomial(link = "logit"))
+```
+
+```{r}
+# Métricas de ajuste Modelo 2
+logLik(modelo2)
+modelo2$deviance
+#modelo2$df.residual
+lrtest(modelo2)                  
+#lrtest(modelo1, modelo2)
+anova(modelo2)
+#anova(modelo1, modelo2)
+```
+
+El modelo propuesto 2 obtuvo un ajuste similar. El AIC aumentó ligeramente (15.5 puntos). El ajuste del Modelo 2 es significativamente superior al modelo nulo. Pero respecto al Modelo 1 no hubo mejoría. *NumOfProducts* continua siendo la que registró un mayor reducción, seguido *Age* y *IsActiveMember*, por lo que la variable indicadora en el modelo respetó el patrón original.
+
+### 2.3.1 Atributos Modelo 2
+
+```{r}
+# Atributos Modelo 2
+summary(modelo2)
+exp(coef(modelo2))         # Odds Ratios (cociente de momios)
+exp(confint(modelo2))      # IC de Odds Ratios
+```
+
+En cuanto la interpretación, sí hubo una mejora considerable. Los primeros reflejan el mismo comportamiento:
+
+- $\beta_1$ = 0.071, postivo y significativo. "Por cada año adicional de edad, los momios de abandono aumentan aproximadamente 7.4%, manteniendo lo demás constante. "
+
+- $\beta_2$ = -0.52, negativo y significativo. "Los momios de abandono de los hombres son aproximadamente 0.59 veces los de las mujeres, con una reducción cercana al 41%."
+
+- $\beta_3$ = 0.915, positivo y significativo. "Los momios de abandono de los clientes alemanes son aproximadamente 2.5 veces los de los clientes franceses."
+
+- $\beta_4$ = 0.052, positivo y no significativo. No se encontraron diferencias estadísticamente significativas entre clientes franceses y españoles.
+
+- $\beta_5$ = -1.102, negativo y significativo. "Los momios de abandono de los clientes activos son aproximadamente 0.33 veces los de los clientes no activos, una reducción cercana al 67%"
+
+Sin embargo, los coeficientes sobre el numero de productos ahora ya se pueden interpretar. Se encontró que:
+
+- $\beta_6$ = -1.52, negativo y significativo. "Los momios de abandono de los clientes con dos productos son aproximadamente 0.218 veces los de los que solo tienen un producto, una reducción cercana al 78.2%"
+
+- $\beta_7$ = 2.81, positivo y significativo. "Los momios de abandono de los clientes con 3 o más productos son aproximadamente 16.7 veces los de los que solo tienen un producto."
+
+Entonces, el modelo resultante mantuvo un nivel de ajuste similar al Modelo 1, aunque este produjo coeficientes más estables e interpretables, por lo que se considera una alternativa adecuada para etapas posteriores de validación.
+
+## 2.4 Modelo Propuesto 3
+
+Para el tercer modelo se propusieron dos alternativas. Ambas conservan las variables que demostraron mayor capacidad predictiva en los modelos anteriores, aunque ahora incorpora una variable relacionada con el patrimonio de cliente (*Balance_Zero*). Es la versión codificada de la variable *Balance*, con el objetivo de capturar de manera más clara la posible existencia de dos perfiles de clientes diferenciados.
+
+- Alternativa 1:
+
+  - Se especifica: logit(P(*Exited*=1)) = $\beta_0$ + $\beta_1$Age + $\beta_2$Gender + $\beta_3$Geography + $\beta_4$IsActiveMember + $\beta_5$NumOfProducts_3M + $\beta_6$Balance_Zero
+
+Justificación: La variable *Balance_Zero* mostró diferencias relevantes entre los clientes que permanecen y aquellos que abandonan. Especialmente una elevada concentración de clientes con saldo igual a cero, sugiriendo la existencia de dos comportamientos potencialmente distintos: clientes con saldo positivo y clientes sin saldo. Esto permite evaluar si la condición de tener o no saldo aporta información adicional para explicar el abandono.
+
+- Alternativa 2:
+
+  - Se especifica: logit(P(*Exited*=1)) = $\beta_0$ + $\beta_1$Age + $\beta_2$Gender + $\beta_3$Geography + $\beta_4$IsActiveMember + $\beta_5$NumOfProducts_3M + $\beta_6$Balance_Zero + $\beta_7$(NumOfProducts_3M$x$Balance_Zero)
+
+Justificación: Esta especificación surge de la hipotesis de que el efecto de número de productos podría depender de la condición del saldo del cliente. Es decir, la influencia de poseer algún producto podria no ser la misma para clientes con saludo nulo que para aquellos con saldo positivo en la cuenta. Se incluye entonces un término de interacción para evaluar si existe un efecto conjunto entre ambas variables y determinar si la relación entre el número de productos y el abandono varían según el nivel de saldo observado.
+
+```{r}
+# Especifiación Modelo 3
+modelo3 <- glm(Exited ~ Age + Gender + Geography + IsActiveMember + NumProducts_3M + Balance_Zero,
+               data = datos, family = binomial(link = "logit"))
+```
+
+```{r}
+# Métricas de ajuste Modelo 3
+#logLik(modelo3)
+#modelo3$deviance
+#modelo3$df.residual
+#lrtest(modelo3)
+AIC(modelo2,modelo3)
+lrtest(modelo3, modelo2)      
+anova(modelo3, modelo2)          
+```
+
+El modelo propuesto 3, alternativa 1, muestra que existe evidencia estadística ($\chi^2$ = 5.06, p \< 0.05) de que la variable aporta información adicional aun despúes de controlar por edad, género, país, actividad del cliente y número de productos contratados. La devianza se redujo sutilmente, con respecto al Modelo 2. Si bien hay una mejora en el ajuste estadísticamente significativa (p = 0.024), la mangnitud de la reducción es relativamente pequeña en comparación con la devianza total del modelo.
+
+```{r}
+# Especificación Modelo 3 con Interacción
+modelo_3_vol_2 <-glm(Exited ~ Age + Gender + Geography + IsActiveMember + NumProducts_3M*Balance_Zero,
+               data = datos, family = binomial(link = "logit"))
+```
+
+```{r}
+# Métricas de ajuste Modelo 3 con Interacción
+#logLik(modelo_3_vol_2)
+#modelo3$deviance
+#modelo3$df.residual
+#lrtest(modelo_3_vol_2)                 
+lrtest(modelo_3_vol_2, modelo2)         
+anova(modelo_3_vol_2, modelo2)  
+anova(modelo_3_vol_2)
+```
+
+La situación cambia al observar modelo propuesto 3, alternativa 2. Se presenta un ajuste significativamente superior al Modelo 2 ($\chi^2$ = 179.84, p \< 0.001), indicando que los términos de interacción brindan información relevante para explicar el abandono de los clientes. El *LogLik* aumentó aunque de forma ligera. En general, sugiere que el valor explicativo de *Balance_Zero* se encuentra principalmente en su efecto conjunto con el número de productos contratados y no únicamente en su efecto individual. Se prefiere indagar con esta alternativa como Modelo 3.
+
+### 2.4.1 Atributos Modelo 3
+
+Recordando las referencias:
+
+```{r}
+# Verificación Niveles (Referencia) de Variables Categóricas
+levels(datos$Exited)
+levels(datos$Gender)
+levels(datos$Geography)
+levels(datos$NumProducts_3M)
+levels(datos$Balance_Zero)
+modelo3 <-modelo_3_vol_2
+```
+
+```{r}
+# Atributos Modelo 3 Final
+summary(modelo3)
+exp(coef(modelo3))         # Odds Ratios (cociente de momios)
+exp(confint(modelo3))      # IC de Odds Ratios
+```
+
+Tomando en cuantas las referecnias. En cuanto a los coeficiente, los primeros reflejan el mismo comportamiento que se venia observando:
+
+- $\beta_1$ = 0.071, postivo y significativo. "Por cada año adicioanl de edad, los momios de abandono aumentan aproximadamente 7.4%, manteniendo lo demás constante."
+
+- $\beta_2$ = -0.52, negativo y significativo. "Los momios de abandono de los hombres son aproximadamente 0.59 veces los de las mujeres, una reducción cercana al 41%."
+
+- $\beta_3$ = 0.886, positivo y significativo. "Los momios de abandono de los clientes alemanes son aproximadamente 2.4 veces los de los clientes franceses."
+
+- $\beta_4$ = 0.063, positivo y no significativo. No se encontraron diferencias estadísticamente significativas entre clientes franceses y españoles.
+
+- $\beta_5$ = -1.088, negativo y significativo. "Los momios de abandono de los clientes activos son aproximadamente 0.33 veces los de los clientes no activos, una reducción cercana al 67%"
+
+En cuanto los términos de interacción se encontró que:
+
+- $\beta_6$ = -0.98, negativo y significativo. "Los cliente con saldo positivo, y que tienen dos productos presentan momios de abandono que son aproximadamente 0.37 veces los momios de clientes que tienen un solo producto, una reducción de cercana al 62.5%."
+
+- $\beta_7$ = 3.98, positivo y significativo. "Los clientes con saldo positivo, y que tienen tres o más productos presentan momios de abandono que son aproximadamente 53 veces mayores los momios de clientes que tienen un solo producto".
+
+- $\beta_8$ = 0.821, positivo y significativo. "Los clientes con un solo producto, y con saldo igual a 0, presentan momios de abandono que son aproximadamente 2.27 veces mayores a los momios de los clientes con saldo positivo.
+
+- $\beta_9$ = -1.83, negativo y significativo. "Entre los clientes con saldo nulo, tener dos productos reduce aún más los momios de abandono que el de los clientes con un producto (-0.982 - 1.837 = -2.819, exp(-2.819) = 0.06), reduce cerca del 94%.
+
+- $\beta_10$ = -2.61, negativo y significativo. "Entre los clientes con saldo nulo, tener más de dos productos presenta un momio 3.9 veces mayor de abandono que el de los clientes con un solo producto (3.979 - 2.619 = 1.360, exp(1.360) = 3.89).
+
+| Balance | Productos | OR    |
+|---------|-----------|-------|
+| \>0     | 1         | 1     |
+| \>0     | 2         | 0.375 |
+| \>0     | 3+        | 53.47 |
+| = 0     | 1         | 2.27  |
+| = 0     | 2         | 0.14  |
+| = 0     | 3+        | 8.85  |
+
+Lo anterior se traduce en la tabla superior, que presenta los OR asociados a las distintas combinaciones entre el número de productos contratados y la condición de saldo del cliente. Recordar que la referencia corresponde a los clientes con saldo positivo y un producto contratado (OR = 1).
+
+- Los clientes con saldo positivo y dos productos presentan los menores momios de abandono (OR = 0.375) representa una reducción aproximada del 62.5% respecto al grupo de referencia. Por el contrario, los clientes con saldo positivo y tres o más productos presentan los mayores momios de abandono (OR = 53.47), indicando un riesgo superior.
+
+- Entre los clientes con saldo nulo, aquellos que poseen un producto presentan momios de abandono 2.27 veces mayores que los clientes con saldo positivo y un producto. Sin embargo, cuando el cliente posee dos productos, los momios disminuyen considerablemente (OR = 0.14), convirtiéndose en el grupo con menor riesgo de abandono.
+
+- Finalmente, los clientes con saldo nulo y tres o más productos presentan momios de abandono aproximadamente 8.85 veces mayores que los del grupo de referencia. Aunque este riesgo sigue siendo elevado, resulta significativamente menor al observado en los clientes con saldo positivo y tres o más productos (OR = 53.47).
+
+Esto es evidencia de que elefecto del número de productos sobre el abandono depende de la condición de saldo del cliente, confirmando la presencia de una interacción importante entre ambas variables.
+
+Desde una perspectiva de negocio, este comportamiento sugiere por lo menos dos dinámicas operativas: por un lado, los clientes sin saldo y con un solo producto podrían estar utilizando la cuenta de manera transitoria o como "puente" transaccional entre instituciones, lo que explica su alta propensión al abandono. Por otro lado, la drástica reducción del riesgo en clientes con dos productos (tanto en saldo positivo como nulo) podría indicar una mayor vinculación institucional (por ejemplo, al combinar poseer una cuenta de captación con una tarjeta de crédito) y estabiliza su permanencia. Estos hallazgos señalan la importancia de que la institución investigue la composición específica de los portafolios de productos para diseñar estrategias de retención diferenciadas según el segmento de saldo, además de considerar las otras variables como la edad y el género.
+
+## 2.5 AIC
+
+Bajo el Criterio de Información de Akaike(AIC) se prefiere el modelo con el menor valor de AIC. Se observa que el Modelo 3 presenta el menor valor de AIC, por lo que es el modelo con mejor equilibrio entre ajuste y complejidad.
+
+```{r}
+# Tabla Criterio de Información Akaike de los Modelos
+AIC(modelo1, modelo2, modelo3)
+```
+
+# 3. Validación
+
+Una vez estimados los modelos de regresión logística candidatos, se evaluó la validez de los supuesto asociados al modelo y verificar la estabilidad de las estimaciones. Los supuestos analizados fueron:
+
+- Independencia de las observaciones.
+- Linealidad entre los predictores continuos y el logit de la probabilidad de respuesta (prueba de Box-Tidwell y gráfica Age vs logit).
+- Ausencia de multicolinealidad entre predictores (VIF generalizado, GVIF).
+- Ausencia de observaciones altamente influyentes (Distancia de Cook, residuos studentizados y leverage).
+
+Dado que Age es la única variable continua incluida en los tres modelos, los resultados relacionados con la linealidad del logit son directamente comparables entre especificaciones. Para la multicolinealidad, dado que los modelos incorporan variables categóricas con dummies y términos de interacción, se utilizó el GVIF (*Generalized Variance Inflation Factor*).
+
+El supuesto de independencia se asume satisfecho dado que cada observación representa un cliente distinto y el dataset no posee estructura temporal, longitudinal ni de panel.
+
+## 3.1 Modelo 1
+
+```{r}
+# Generación de estimaciones Modelo 1
+datos$logit_m1 <- predict(modelo1, type = "link")      # Logit estimado
+datos$probs_m1 <- predict(modelo1, type = "response")  # Probabilidad: 1/(1+exp(-logit))
+datos$resid_m1 <- rstandard(modelo1, type = "deviance") # Residuos de devianza estandarizados
+```
+
+```{r}
+residualPlots(modelo1)
+```
+
+Los resultados para el Modelo 1 mostraron un estadístico de prueba de 234.34 (p \< 0.001) para Age. Este resultado, consistente con la prueba de Box-Tidwell, indica que existe una componente no lineal residual de Age que el modelo no captura completamente.
+
+La gráfica del Predictor Lineal vs Residuos de Pearson muestra que la mayoría de los residuos se distribuyen de forma simétrica alrededor de cero, con mayor dispersión en los extremos positivos del predictor.
+
+La inspección gráfica sugiere que la especificación propuesta resulta razonable para describir la relación entre los predictores y la probabilidad de abandono.
+
+```{r}
+plot(datos$Age, datos$logit_m1,
+     xlab = "Age", ylab = "Logit estimado",
+     main = "Linealidad: Age vs Logit (Modelo 1)",
+     pch = 20, col = rgb(0,0,0,0.2))
+abline(lm(datos$logit_m1 ~ datos$Age), col = "red", lwd = 2)
+```
+
+```{r}
+datos_tmp <- datos %>%
+  mutate(Exited_num = as.numeric(Exited))
+boxTidwell(Exited_num ~ Age, data = datos_tmp)
+rm(datos_tmp)
+```
+
+La linealidad entre la variable continua *Age* y el logit de la probabilidad de abandono fue también fue evaluada mediante la prueba de Box-Tidwell. Los resultados mostraron evidencia estadísticamente significativa de desviación respecto a la linealidad (t = -10.613, p \< 0.001).
+
+Sin embargo, la inspección gráfica reveló una tendencia creciente aproximadamente lineal, sin cambios abruptos en la pendiente ni patrones de curvatura pronunciados.
+
+```{r}
+#kappa.lm(modelo1)
+car::vif(modelo1)
+```
+
+Ninguna variable presentó valores VIF superiores a 5, por lo que no se identificaron problemas de multicolinealidad que pudieran afectar la estabilidad de las estimaciones. Esto es consistente con la matriz de correlaciones calculada en el análisis exploratorio (correlaciones variables numéricas menores a 0.03 en todos los casos).
+
+```{r}
+plot(modelo1, which = 4, main = "Distancia de Cook — Modelo 1")
+abline(h = 4/nrow(datos), col = "red", lty = 2)
+```
+
+```{r}
+plot(modelo1, which = 5, main = "Residuos vs Apalancamiento — Modelo 1")
+influenceIndexPlot(modelo1, vars = c("Cook", "Studentized"),
+                   main = "Índices de Influencia — Modelo 1")
+```
+
+La influencia de observaciones individuales fue evaluada mediante la Distancia de Cook, los residuos studentizados y los gráficos de leverage. Aunque algunas observaciones superaron el criterio de referencia (4/n = 0.0047), ninguna presentó valores de Distancia de Cook cercanos a umbrales de alta inluencia (0.5 o 1).
+
+En conjunto, los resultados sugieren que el ajuste obtenido no se encuentra dominado por un pequeño grupo de observaciones influyentes y que las estimaciones pueden considerarse estables.
+
+Por diseño metodológico cada cliente es una observación independiente. No obstante, se presentan los diagnósticos visuales y estadísticos como verificación formal.
+
+```{r}
+forecast::ggtsdisplay(datos$resid_m1, plot.type = "histogram",
+                      main = "Diagnóstico de Residuos — Modelo 1")
+```
+
+```{r}
+randtests::runs.test(datos$resid_m1, alternative = "two.sided")
+```
+
+## 3.2 Modelo 2
+
+```{r}
+# Generación de estimaciones Modelo 2
+datos$logit_m2 <- predict(modelo2, type = "link")
+datos$probs_m2 <- predict(modelo2, type = "response")
+datos$resid_m2 <- rstandard(modelo2, type = "deviance")
+```
+
+```{r}
+residualPlots(modelo2)
+```
+
+La gráfica Age vs Logit del Modelo 2 confirma el mismo comportamiento en el Modelo 1. La notable diferencia visual respecto al Modelo 1 es que, al eliminar la separación completa de *NumOfProducts*, el rango del predictor lineal se reduce, lo que produce una nube de puntos más compacta y una línea de regresión más representativa del patrón central. Refleja que la recodificación mejoró la estabilidad del modelo.
+
+```{r}
+plot(datos$Age, datos$logit_m2,
+     xlab = "Age", ylab = "Logit estimado",
+     main = "Linealidad: Age vs Logit (Modelo 2)",
+     pch = 20, col = rgb(0,0,0,0.2))
+abline(lm(datos$logit_m2 ~ datos$Age), col = "red", lwd = 2)
+```
+
+Dado que *Age* es la única variable continua y no fue modificada entre el Modelo 1 y el Modelo 2, los resultados de la prueba de Box-Tidwell son idénticos: $\lambda$ = -0.175, t = -10.613, p \< 0.001. La recodificación de *NumOfProducts* en *NumProducts_3M* no altera la relación entre Age y el logit del modelo. La conclusión es la misma, desviación estadísticamente significativa del supuesto de linealidad, pero sin curvatura pronunciada en la inspección gráfica. Se aborda esta situación posteriomente.
+
+Por otro lado, para corroborar lo analizado, se insepccionó con la variable *Balance* y observar los resultados. Una vez más se observa evidencia de la existencia de dos grupos claramente diferenciados: clientes sin saldo y clientes con saldo positivo, donde no existe una relación lineal evidente con el logit del modelo. Haber realizado la transformación fue lo adecuado pues permitió representar de forma más directa el patrón observado en los datos, mejorando la interpretabilidad del modelo y incluso facilitando la identificación de posibles interacciones con otras variables explicativas.
+
+```{r}
+plot(datos$Balance, datos$logit_m2,
+     xlab = "Balance", ylab = "Logit estimado",
+     main = "Linealidad: Balance vs Logit (Modelo 2)",
+     pch = 20, col = rgb(0,0,0,0.2))
+abline(lm(datos$logit_m2 ~ datos$Balance), col = "red", lwd = 2)
+```
+
+```{r}
+#kappa.lm(modelo2)
+car::vif(modelo2)
+```
+
+De igual forma, ninguna variable presentó valores VIF superiores a 5, por lo que no se identificaron problemas de multicolinealidad que pudieran afectar la estabilidad de las estimaciones.
+
+```{r}
+plot(modelo2, which = 4, main = "Distancia de Cook — Modelo 2")
+abline(h = 4/nrow(datos), col = "red", lty = 2)
+```
+
+```{r}
+plot(modelo2, which = 5, main = "Residuos vs Apalancamiento — Modelo 2")
+influenceIndexPlot(modelo2, vars = c("Cook", "Studentized"),
+                   main = "Índices de Influencia — Modelo 2")
+```
+
+La Distancia de Cook en el Modelo 2 es prácticamente idéntico al del Modelo 1 (mismo conjunto de observaciones destacadas: 1615, 5466, 6764. Sin embargo, el gráfico de Residuos vs Leverage muestra una mejora notable en el rango del eje horizontal (leverage) se reduce de [0.00, 0.06] en el Modelo 1 a [0.00, 0.008] en el Modelo 2, lo que indica que la eliminación de la separación completa redujo efectivamente el apalancamiento de las observaciones asociadas.
+
+Misma interpretación que Modelo 1: datos transversales, supuesto satisfecho por diseño.
+
+```{r}
+forecast::ggtsdisplay(datos$resid_m2, plot.type = "histogram",
+                      main = "Diagnóstico de Residuos — Modelo 2")
+```
+
+```{r}
+randtests::runs.test(datos$resid_m2, alternative = "two.sided")
+```
+
+Entonces, este modelo presenta los mismos resultados de validación que el Modelo 1, con la mejora significativa de haber resuelto la separación cuasi-completa. Las estimaciones son más estables e interpretables. Es el modelo de referencia para comparar con el Modelo 3.
+
+## 3.3 Modelo 3 y Correción
+
+Antes de evaluar el Modelo 3, se exploró una especificación alternativa para la variable Age. La prueba de Box-Tidwell indicó evidencia de no linealidad entre la edad y el logit de la probabilidad de abandono, por lo que se incorporó un término cuadrático ($Age^2$), como aproximación sencilla, con el objetivo de capturar posibles efectos curvilíneos y evaluar si ello mejora el ajuste del modelo.
+
+```{r}
+# Especifiación del Modelo 3 con Corrección del Término Cuadrático.
+modelo3_cuad <- glm(Exited ~ Age + I(Age^2) + Gender + Geography + IsActiveMember + NumProducts_3M*Balance_Zero,
+               data = datos, family = binomial(link = "logit"))
+```
+
+```{r}
+# Métricas de Ajuste Modelo 3 con Corrección
+lrtest(modelo3_cuad, modelo3)      
+anova(modelo3_cuad, modelo3)
+anova(modelo3_cuad, modelo2)  
+```
+
+El Modelo 3 con la corrección está justificado. Este modelo presenta un ajuste significativamente superior al Modelo 3 sin la correción ($\chi^2$)= 220.86, p \< 0.001), indicando que ($Age^2$) aporta información real que el modelo lineal no capturaba. El *LogLik* aumentó de -3639.2 a -3528.
+
+Por otro lado, hubo una reducción de \~219 puntos de AIC, con un solo parámetro, lo que es una mejora considerable. Tan solo la interacción completa de *NumProducts_3M × Balance_Zero* redujo el AIC en \~158 puntos.
+
+```{r}
+# Atributos Modelo 3 con Corrección
+summary(modelo3_cuad)
+```
+
+Interpretación de los coeficientes clave (los demás se mantienen similares respecto al Modelo 3 Normal):
+
+- $\beta_{Age}$ = 0.344, hay un fecto lineal positivo. "A edad media, cada año adicional aumenta el log-momio."
+
+- $\beta_{Age^2}$ = -0.0029, se frena el crecimiento. "El efecto marginal de la edad se reduce conforme aumenta la edad."
+
+El resto de coeficientes cambiaron muy poco respecto al Modelo 3 original, lo que indica estabilidad estructural del modelo.
+
+```{r}
+# Estimación del Pico de Inversión del Efecto cuadrático
+b1 <- coef(modelo3_cuad)["Age"]
+b2 <- coef(modelo3_cuad)["I(Age^2)"]
+edad_pico <- -b1 / (2 * b2)
+edad_pico
+```
+
+El riesgo de abandono aumenta progresivamente hasta los \~59 años, y a partir de ahí disminuye. Los clientes de mediana edad avanzada son el segmento de mayor riesgo, no los más mayores.
+
+```{r}
+# Generación de Estimaciones del Modelo 3 corregido
+datos$logit_m3 <- predict(modelo3_cuad, type = "link")
+datos$probs_m3 <- predict(modelo3_cuad, type = "response")
+datos$resid_m3 <- rstandard(modelo3_cuad, type = "deviance")
+```
+
+```{r}
+residualPlots(modelo3_cuad)
+```
+
+Los resultados de este Modelo 3 corregido muestran que *Age* ya no presenta evidencia de falta de linealidad residual (Test stat = 0.00, p = 1.000), confirmando que la incorporación del término $Age^2$ resuelve la desviación detectada en los Modelos 1 y 2.
+
+La gráfica del Predictor Lineal vs Residuos muestra una distribución más compacta y simétrica alrededor de cero en comparación con los modelos anteriores.
+
+```{r}
+plot(datos$Age, datos$logit_m3,
+     xlab = "Age", ylab = "Logit estimado",
+     main = "Linealidad: Age vs Logit (Modelo 3)",
+     pch = 20, col = rgb(0,0,0,0.2))
+abline(lm(datos$logit_m3 ~ datos$Age), col = "red", lwd = 2)
+```
+
+La gráfica *Age* vs Logit del Modelo 3 muestra una forma cuadrática cóncava claramente visible. El logit estimado crece hasta aproximadamente los 59 años y desciende a partir de ahí, capturando el patrón no lineal que los Modelos 1 y 2 no podían representar. Esto es consistente con el coeficiente negativo de $Age^2$ y con la edad pico calculada (\~59.35 años). La incorporación del término cuadrático resuelve la desviación detectada por Box-Tidwell en los modelos anteriores.
+
+```{r}
+#kappa.lm(modelo3)
+car::vif(modelo3_cuad)
+```
+
+La evaluación del GVIF en muestra valores elevados para *Age* (GVIF\^(1/2Df) = 6.76) e I($Age^2$) (6.78), lo cual es esperado y estructuralmente inevitable en modelos con términos polinomiales, dado que están algebraicamente relacionados. Esta colinealidad no afecta la validez del modelo ni la estabilidad de las estimaciones, ya que el término cuadrático fue incluido por razones sustantivas confirmadas por la prueba LRT y no como variable independiente adicional. El resto de predictores presentan valores por debajo del umbral de referencia de $\sqrt{5}$ $\approx$ 2.24.
+
+```{r}
+plot(modelo3_cuad, which = 4, main = "Distancia de Cook — Modelo 3")
+abline(h = 4/nrow(datos), col = "red", lty = 2)
+```
+
+```{r}
+plot(modelo3_cuad, which = 5, main = "Residuos vs Apalancamiento — Modelo 3")
+influenceIndexPlot(modelo3, vars = c("Cook", "Studentized"),
+                   main = "Índices de Influencia — Modelo 3")
+```
+
+La Distancia de Cook identifica las observaciones 5466, 5608 y 5367 como las de mayor influencia, con valores máximos de \~0.0085. Aunque ligeramente superiores al criterio de referencia (4/n = 0.0004), ninguna se aproxima a los umbrales críticos de 0.5 o 1. El cambio en las observaciones es consistente con la mayor complejidad del modelo, pues la interacción y el término cuadrático podrían redistribuir el leverage hacia combinaciones específicas de edad avanzada con saldo nulo y múltiples productos.
+
+El gráfico de Residuos vs Leverage muestra un rango de leverage más amplio que los modelos anteriores (hasta 0.030), lo que es consistente con la mayor complejidad del modelo. Sin embargo, ninguna observación se aproxima a las regiones críticas de los contornos de Distancia de Cook (0.5 y 1).
+
+```{r}
+forecast::ggtsdisplay(datos$resid_m3, plot.type = "histogram",
+                      main = "Diagnóstico de Residuos — Modelo 3")
+```
+
+```{r}
+randtests::runs.test(datos$resid_m3, alternative = "two.sided")
+```
+
+Misma interpretación que Modelos 1 y 2: supuesto satisfecho por diseño de corte transversal.
+
+En términos generales, los tres modelos superan satisfactoriamente las evaluaciones de validación, con las siguientes precisiones:
+
+- Modelo 1: Presenta la limitación más grave, la separación cuasi-completa en *NumOfProducts* ($\beta$ = 16.33, SE = 175.47), que compromete la interpretación de ese coeficiente específico.
+
+- Modelo 2: Resuelve la separación completa mediante recodificación. Estimaciones estables e interpretables. Es el modelo de referencia más parsimonioso.
+
+- Modelo 3 (corregido): Incorpora $Age^2$ resolviendo la desviación de linealidad detectada por Box-Tidwell, e incluye la interacción *NumProducts_3M* × *Balance_Zero.* La colinealidad es inevitable y esperada en modelos polinomiales, y no compromete la validez del modelo.
+
+- Ningún modelo presenta observaciones altamente influyentes (Distancia de Cook \< 0.01 en todos los casos).
+
+# 4. Métricas de Clasificación
+
+Una vez evaluados los tres modelos de regresión logística, se procedió a comparar su capacidad de clasificación utilizando un punto de corte de 0.5. Es decir, la probabilidad estimada $\geq$ 0.5 que pertenecerá a la clase *Abandona*
+
+Se analizaron métricas estándar: exactitud, sensibilidad, especificidad, precisión, F1-Score y el área bajo la curva ROC (AUROC).
+
+Dado que la variable de respuesta presenta un desbalance de clase (79.63% *Permanece* vs 20.37% *Abandona*), la exactitud por sí sola no es suficiente para evaluar el desempeño. El modelo nulo, que clasifica todo como 'Permanece', alcanzaría un 79.63% de exactitud sin aportar ninguna información. Por ello, la sensibilidad y el AUROC son las métricas de mayor relevancia para este problema, dado el objetivo de identificar correctamente a los clientes en riesgo de abandono.
+
+```{r}
+punto_corte <- 0.5
+```
+
+## 4.1 Modelo 1
+
+```{r}
+clases_m1 <- ifelse(datos$probs_m1 >= punto_corte, "Abandona", "Permanece") %>% factor(levels = c("Permanece", "Abandona"))
+mat_conf_m1 <- confusionMatrix(clases_m1, datos$Exited, positive = "Abandona")
+
+mat_conf_m1$table    # Tabla: Verdaderos Positivos, Falsos Positivos, etc.
+cat("\n")
+mat_conf_m1$byClass  # Métricas: Sensibilidad, Especificidad, Precisión, etc.
+cat("\n")
+mat_conf_m1$overall  # Exactitud global y Kappa
+```
+
+```{r}
+# Curva ROC y AUROC — Modelo 1
+roc_m1 <- roc(datos$Exited, datos$probs_m1)
+plot(roc_m1, col = "steelblue", lwd = 2, print.auc = TRUE,
+     main = "Curva ROC — Modelo 1",
+     xlab = "1 - Especificidad (Tasa de Falsos Positivos)",
+     ylab = "Sensibilidad (Tasa de Verdaderos Positivos)")
+abline(a = 0, b = 1, lty = 2, col = "gray") # Línea de referencia (clasificador aleatorio)
+auc(roc_m1) # Área bajo la curva ROC
+```
+
+El Modelo 1 clasificó correctamente 8,405 de los 10,000 clientes (Exactitud = 84.05%), valor está inflado por el desbalance de clases.
+
+- Verdaderos Positivos (VP): 774 clientes que abandonaron y fueron correctamente identificados.
+- Falsos Negativos (FN): 1,263 clientes que abandonaron pero el modelo los clasificó como *Permanece* (errores de mayor costo en un contexto de retención).
+- Verdaderos Negativos (VN): 7,631 clientes que permanecieron y fueron correctamente clasificados.
+- Falsos Positivos (FP): 332 clientes que permanecieron pero el modelo los clasificó como *Abandona*.
+
+La Sensibilidad de 37.99% indica que el modelo detecta menos de 4 de cada 10 clientes que efectivamente abandonan. Esto es una limitación importante desde la perspectiva del negocio, ya que implica que más del 60% de los abandonos no son identificados.
+
+Por otro lado, la Especificidad de 95.83% es elevada, lo que significa que el modelo es muy preciso al clasificar a los clientes que permanecen. La Precisión (PPV) de 69.98% indica que cuando el modelo predice abandono, tiene razón en aproximadamente 7 de cada 10 casos.
+
+El F1-Score de 0.493 refleja un balance moderado entre la Sensibilidad y la Precisión.
+
+La curva ROC arroja un AUROC de 0.833, indicando una capacidad discriminante buena y significativamente superior al clasificador aleatorio (AUROC = 0.5). Esta métrica es robusta ante el desbalance de clases y confirma que el modelo captura información relevante sobre el abandono.
+
+## 4.2 Modelo 2
+
+```{r}
+clases_m2 <- ifelse(datos$probs_m2 >= punto_corte, "Abandona", "Permanece") %>% factor(levels = c("Permanece", "Abandona"))
+mat_conf_m2 <- confusionMatrix(clases_m2, datos$Exited, positive = "Abandona")
+mat_conf_m2$table
+mat_conf_m2$byClass
+mat_conf_m2$overall
+```
+
+```{r}
+roc_m2 <- roc(datos$Exited, datos$probs_m2)
+plot(roc_m2, col = "tomato", lwd = 2, print.auc = TRUE,
+     main = "Curva ROC — Modelo 2",
+     xlab = "1 - Especificidad (Tasa de Falsos Positivos)",
+     ylab = "Sensibilidad (Tasa de Verdaderos Positivos)")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+auc(roc_m2)
+
+```
+
+El Modelo 2, que incorporó la recodificación de NumOfProducts en tres niveles (1, 2, 3+) para resolver la separación completa observada en el Modelo 1, mostró resultados de clasificación son idénticos al Modelo 1: Exactitud = 84.00%, Sensibilidad = 37.75%, Especificidad = 95.83% y AUROC = 0.833.
+
+Era de esperar, pues la recodificación no alteró la estructura informativa de la variable, sino que únicamente eliminó la inestabilidad encontrada. Al final la ventaja del Modelo 2 sobre el Modelo 1 radica en la estabilidad e interpretabilidad de los coeficientes (especialmente $\beta_7$ = 2.81 vs $\beta_8$ = 16.33 con SE = 175), mas no en un incremento del poder predictivo con este umbral de clasificación.
+
+## 4.3 Modelo 3
+
+```{r}
+clases_m3 <- ifelse(datos$probs_m3 >= punto_corte, "Abandona", "Permanece") %>% factor(levels = c("Permanece", "Abandona"))
+mat_conf_m3 <- confusionMatrix(clases_m3, datos$Exited, positive = "Abandona")
+mat_conf_m3$table
+mat_conf_m3$byClass
+mat_conf_m3$overall
+```
+
+```{r}
+roc_m3 <- roc(datos$Exited, datos$probs_m3)
+plot(roc_m3, col = "forestgreen", lwd = 2, print.auc = TRUE,
+     main = "Curva ROC — Modelo 3",
+     xlab = "1 - Especificidad (Tasa de Falsos Positivos)",
+     ylab = "Sensibilidad (Tasa de Verdaderos Positivos)")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+auc(roc_m3)
+```
+
+El Modelo 3, que introduce la interacción entre el número de productos y la condición de saldo del cliente, además del término cuadrático $Age^2$, mejoró de forma consistente respecto a los modelos anteriores en todas las métricas evaluadas:
+
+Exactitud: 85.44% Sensibilidad: 43.45% (+3.46) Especificidad: 96.18% (+0.35 pp) Precisión (PPV): 74.43% F1-Score: 0.549 AUROC: 0.852
+
+Un AUROC de 0.85 implica que si se toman dos clientes al azar, uno que abandona y uno que permanece, el modelo asignará una mayor probabilidad de abandono al primero en el 85.2% de los casos.
+
+La mejora en Sensibilidad, aunque es moderada en términos porcentuales, puede tener implicaciones de negocio relevantes, detectar 22 abandonos adicionales correctamente representa clientes retenibles.
+
+El Modelo 3 exhibe una curva ligeramente superior en toda su longitud, con mayor área especialmente en la región de baja tasa de Falsos Positivos (alta Especificidad), que es la región de mayor interés en el contexto de una institucón financiera.
+
+# Tabla Resumen Comparativa Modelos
+
+```{r}
+tabla_comparativa <- data.frame(
+  Modelo    = c("Modelo 1", "Modelo 2", "Modelo 3"),
+  Variables = c("Age, Gender, Geography, IsActiveMember, NumOfProducts",
+                "Age, Gender, Geography, IsActiveMember, NumProducts_3M",
+                "Age, IsActiveMember, Geography, NumProducts_3M*Balance_Zero"),
+  AIC       = c(AIC(modelo1), AIC(modelo2), AIC(modelo3_cuad)),
+  Devianza  = c(modelo1$deviance, modelo2$deviance, modelo3_cuad$deviance),
+  Exactitud = c(mat_conf_m1$overall["Accuracy"],
+                mat_conf_m2$overall["Accuracy"],
+                mat_conf_m3$overall["Accuracy"]),
+  Sensibilidad = c(mat_conf_m1$byClass["Sensitivity"],
+                   mat_conf_m2$byClass["Sensitivity"],
+                   mat_conf_m3$byClass["Sensitivity"]),
+  Especificidad = c(mat_conf_m1$byClass["Specificity"],
+                    mat_conf_m2$byClass["Specificity"],
+                    mat_conf_m3$byClass["Specificity"]),
+  AUROC     = c(as.numeric(auc(roc_m1)),
+                as.numeric(auc(roc_m2)),
+                as.numeric(auc(roc_m3)))
+)
+```
+
+```{r}
+tabla_comparativa[,-2]
+```
+
+# 5. Selección del Modelo Final
+
+Dado el desbalanceo de clases en la variable de respuesta *Exited*, y insuficiente capacidad predictiva de los predictores, la selección se basa en los siguientes criterios establecidos:
+
+- Calidad de ajuste y parsimonia (AIC, LRT)
+- Significancia estadística coeficientes.
+- Cumplimiento de supuestos
+- Desempeño predictivo (AUROC, métricas de clasificación)
+
+Con base en los criterios de ajuste estadístico, validación de supuestos, interpretabilidad y desempeño predictivo, se selecciona el Modelo 3 como modelo final del análisis.
+
+Justifcación:
+
+- Menor AIC (7081.59): La reducción de \~377 unidades respecto al Modelo 1 y de \~393 respecto al Modelo 2 confirma ampliamente que la complejidad adicional está justificada.
+
+- Menor devianza residual (7057.59): La reducción de \~401 unidades de devianza respecto al Modelo 2 es estadísticamente significativa
+
+- La corrección por $Age^2$ aportó una reducción adicional de \~220 unidades de devianza ($\chi^2$ = 220.86, p\<0.001), respecto al modelo sin correción,lo que justifica su inclusión como término estructuralmente necesario.
+
+- Mayor AUROC (0.852): Mejor capacidad de discriminación general, robusta ante el desbalance de clases.
+
+- Mayor Sensibilidad (43.45%) y F1-Score (0.549): Mejores métricas en la clase de interés (*Abandona*), que es la clase crítica en un problema de retención de clientes.
+
+- Supuestos satisfechos: No se detectaron problemas de multicolinealidad (VIF \< 5 en todos los términos), no se identificaron observaciones altamente influyentes (Distancia de Cook \< 0.01) y la linealidad del logit respecto a Age es visualmente aceptable.
+
+- Interpretabilidad enriquecida: El término de interacción revela una dinámica de negocio sustantiva e informativa (*Sección 2.4.1*), que los modelos más simples no podían capturar
+
+# Conclusiones 
+
+## 6.1 Conclusiones Estadísticas.
+
+- Los tres modelos superan ampliamente al modelo nulo en la prueba LRT (p \< 0.001 en todos los casos), confirmando que las variables incluidas aportan información estadísticamente significativa para explicar el abandono de clientes. El modelo nulo tiene una devianza de 10,109.8; el Modelo 3 la reduce a 7,057.6, una reducción de \~3,052 unidades, indicando un ajuste sustancial.
+
+- Conforme a la tabla de devianza secuencial (anova), el orden de contribución individual fue:
+
+  - Age / $Age^2$: \~979 unidades de reducción (la más importante en todos los modelos)
+
+  - NumProducts_3M × Balance_Zero: \~1,329 unidades combinadas (interacción + efectos principales)
+
+  - IsActiveMember: \~376 unidades
+
+  - Geography: \~257 unidades
+
+  - Gender: \~106 unidades
+
+En conjunto, estas cinco variables (con sus transformaciones) explican prácticamente toda la variación explicable por el modelo.
+
+Todos los predictores del Modelo 3 son estadísticamente significativos al 0.1%, con excepción de GeographySpain (p = 0.545), cuya diferencia respecto a France no no se distingue estadísticamente.
+
+- El supuesto de linealidad se viola en Age con la especificación lineal (Modelos 1 y 2). Se corrigió con $Age^2$, pero la elección de un polinomio de grado 2 es una aproximación.
+
+- El desbalance de clases (80/20) limita la sensibilidad del modelo con punto de corte 0.5.
+
+## 6.2 Conclusiones Contextuales (Negocio)
+
+Traduciendo los resultados estadísticos al fenómeno de abandono bancario se concluye que la edad constituye uno de los predictores más relevantes del modelo y que su efecto sobre la probabilidad de abandono es claramente no lineal. El riesgo de abandono aumenta progresivamente con la edad hasta alcanzar un máximo aproximado alrededor de los 59 años y posteriormente comienza a disminuir. Esto sugiere que los clientes de mediana edad y edad avanzada (aproximadamente entre los 40 y 65 años) representan el segmento con mayor propensión al abandono, más que los clientes de mayor edad. Una posible explicación es que este grupo se encuentra en etapas de transición financiera asociadas a cambios laborales, consolidación de su patrimonio o planeación para el retiro, situaciones que podrían incentivar la búsqueda de nuevas alternativas bancarias.
+
+Sin embargo, desde una perspectiva de implementación práctica, la edad podría constituir la única variable con capacidad real de generalización para un modelo desplegado en producción. En este sentido, una especificación considerablemente más simple basada principalmente en la edad podría resultar más robusta y fácil de implementar que modelos con múltiples transformaciones e interacciones.
+
+logit(P(*Exited*=1)) = $\beta_0$ + $\beta_1$Age + $\beta_2Gender^2$
+
+Las variables relacionadas con el número de productos contratados y especialmente el saldo de la cuenta (*Balance*) parecen dominar gran parte de la capacidad predictiva del modelo. Considerando que aproximadamente el 36% de los clientes presentan un saldo igual a cero, es posible que esta característica haya condicionado el comportamiento de otras variables continuas, como el salario estimado y el puntaje crediticio, reduciendo su aporte dentro del modelo.
+
+```{r}
+prop.table(table(datos$Balance==0))
+```
+
+Desde esta perspectiva, los resultados sugieren que la problemática podría abordarse mediante metodologías alternativas a la regresión logística tradicional, ó mediantes estudios longitudinales que permitan analizar la evolución a través del tiempo de los clientes. También, podrían explorarse estrategias de segmentación previas, como un análisis separado de clientes con saldo nulo y clientes con saldo positivo, en adición a la construcción de nuevas variables que capturen de mejor manera el comportamiento financiero de los usuarios.
+
+Aunque el modelo seleccionado fue construido con el objetivo de maximizar el ajuste estadístico y el desempeño predictivo, no representa la mejor solución desde una perspectiva de negocio. En consecuencia, futuras aplicaciones deberían buscar un equilibrio entre capacidad predictiva, interpretabilidad y utilidad para la toma de decisiones.
+
+
+
+
