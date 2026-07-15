@@ -1,4 +1,4 @@
-# Bank Customer Churn Prediction
+# Interpretable statistical modeling for customer churn analysis.
 
 <p align="center">
   <img src="figures/1.png" width="750">
